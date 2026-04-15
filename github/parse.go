@@ -64,8 +64,22 @@ func prFromNode(n prNode) PR {
 	if len(n.Commits.Nodes) == 0 || n.Commits.Nodes[0].Commit.StatusCheckRollup == nil {
 		return p
 	}
+	// GitHub's rollup returns every check-run attempt, including stale
+	// failures that have since been re-run. Keep only the newest attempt
+	// per check name so a retry doesn't show as still failed.
+	idxByName := map[string]int{}
 	for _, c := range n.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes {
 		ck := checkFromNode(c)
+		if idx, ok := idxByName[ck.Name]; ok {
+			if !ck.At.Before(p.Checks[idx].At) {
+				p.Checks[idx] = ck
+			}
+			continue
+		}
+		idxByName[ck.Name] = len(p.Checks)
+		p.Checks = append(p.Checks, ck)
+	}
+	for _, ck := range p.Checks {
 		p.Total++
 		switch ck.State {
 		case StateSuccess:
@@ -75,7 +89,6 @@ func prFromNode(n prNode) PR {
 		case StatePending:
 			p.Running++
 		}
-		p.Checks = append(p.Checks, ck)
 	}
 	return p
 }

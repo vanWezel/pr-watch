@@ -99,6 +99,52 @@ func TestCheckFromNode_FieldMapping(t *testing.T) {
 	}
 }
 
+func TestPRFromNode_RetryCollapsesOldAttempt(t *testing.T) {
+	// Simulate a check that failed and is now being re-run: the rollup
+	// returns both attempts. Only the newer one should count.
+	old := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	newAttempt := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)
+
+	n := prNode{Number: 1}
+	var entry struct {
+		Commit struct {
+			StatusCheckRollup *struct {
+				Contexts struct {
+					Nodes []contextNode `json:"nodes"`
+				} `json:"contexts"`
+			} `json:"statusCheckRollup"`
+		} `json:"commit"`
+	}
+	entry.Commit.StatusCheckRollup = &struct {
+		Contexts struct {
+			Nodes []contextNode `json:"nodes"`
+		} `json:"contexts"`
+	}{}
+	entry.Commit.StatusCheckRollup.Contexts.Nodes = []contextNode{
+		{Typename: "CheckRun", Name: "test", Status: "COMPLETED", Conclusion: "FAILURE", CompletedAt: old},
+		{Typename: "CheckRun", Name: "test", Status: "IN_PROGRESS", StartedAt: newAttempt},
+		{Typename: "CheckRun", Name: "lint", Status: "COMPLETED", Conclusion: "SUCCESS", CompletedAt: newAttempt},
+	}
+	n.Commits.Nodes = append(n.Commits.Nodes, entry)
+
+	p := prFromNode(n)
+	if p.Total != 2 {
+		t.Fatalf("Total = %d, want 2 (retries should collapse)", p.Total)
+	}
+	if p.Failed != 0 || p.Running != 1 || p.Passed != 1 {
+		t.Fatalf("counts wrong after retry: %+v", p)
+	}
+	if p.State() != StatePending {
+		t.Fatalf("PR should be pending while retry in progress, got %s", p.State())
+	}
+	// The surviving "test" check should be the newer in-progress one.
+	for _, c := range p.Checks {
+		if c.Name == "test" && c.State != StatePending {
+			t.Fatalf("retry kept wrong attempt: %+v", c)
+		}
+	}
+}
+
 func TestPRFromNode_UnresolvedComments(t *testing.T) {
 	n := prNode{Number: 7}
 	n.ReviewThreads.Nodes = []struct {
