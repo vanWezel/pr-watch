@@ -188,6 +188,7 @@ func notifyNewFailures(prev map[string]bool, prs []github.PR) map[string]bool {
 			notify(
 				fmt.Sprintf("PR check failed · %s", p.Repo),
 				fmt.Sprintf("#%d %s", p.Number, p.Title),
+				p.URL,
 			)
 		}
 		next[p.Key()] = true
