@@ -10,13 +10,13 @@ import (
 // prFromJSON builds a PR from one `nodes` entry of the GraphQL search result.
 func prFromJSON(n gjson.Result) PR {
 	p := PR{
-		Number:    int(n.Get("number").Int()),
-		Title:     n.Get("title").String(),
-		URL:       n.Get("url").String(),
-		HeadRef:   n.Get("headRefName").String(),
-		Repo:      n.Get("repository.nameWithOwner").String(),
-		Conflicts: n.Get("mergeable").String() == "CONFLICTING",
-		Comments:  int(n.Get(`reviewThreads.nodes.#(isResolved==false)#|#`).Int()),
+		Number:   int(n.Get("number").Int()),
+		Title:    n.Get("title").String(),
+		URL:      n.Get("url").String(),
+		HeadRef:  n.Get("headRefName").String(),
+		Repo:     n.Get("repository.nameWithOwner").String(),
+		Clean:    n.Get("mergeStateStatus").String() == "CLEAN",
+		Comments: int(n.Get(`reviewThreads.nodes.#(isResolved==false)#|#`).Int()),
 	}
 
 	if d := n.Get("reviewDecision").String(); d != "" {

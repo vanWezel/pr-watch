@@ -37,15 +37,16 @@ type PR struct {
 	Total    int
 	Comments int // unresolved review threads
 
-	Approved  bool // reviewDecision == APPROVED
-	Conflicts bool // merge conflicts with base
+	Approved bool // reviewDecision == APPROVED
+	Clean    bool // mergeStateStatus == CLEAN: GitHub sees nothing blocking the merge
 }
 
-// Ready reports whether the PR is approved, green (or has no checks) and
-// conflict-free, i.e. safe to merge.
+// Ready reports whether GitHub considers the PR mergeable under its branch
+// protection rules (reviews, required checks, conflicts, draft) and no check
+// is running or failing.
 func (p PR) Ready() bool {
 	s := p.State()
-	return p.Approved && !p.Conflicts && (s == StateSuccess || s == StateNone)
+	return p.Clean && (s == StateSuccess || s == StateNone)
 }
 
 // State derives a single status from the per-check counts. Running takes

@@ -69,7 +69,7 @@ const prFields = `nodes {
         url
         headRefName
         reviewDecision
-        mergeable
+        mergeStateStatus
         latestOpinionatedReviews(first: 50) { nodes { state } }
         repository { nameWithOwner }
         reviewThreads(first: 100) { nodes { isResolved } }

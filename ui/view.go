@@ -72,22 +72,63 @@ func (m Model) listView() string {
 	}
 
 	innerW := max(40, outerW-6)
-	rows := m.renderRows(innerW)
-	listBody := strings.Join(rows, "\n")
+
+	// Vertical budget: header block (2) + box border/padding (4) + footer
+	// line (1) + divider (1) = 8 fixed lines; split what's left between the
+	// PR list and the selected PR's checks section so both fit on screen.
+	avail := max(4, m.height-8)
+	checksWant := 2
+	if n := len(m.prs[m.cursor].Checks); n > 0 {
+		checksWant = 2 + min(n, 8)
+	}
+	listMax := avail - checksWant
+	if listMax < 1 {
+		listMax = 1
+	}
+	if listMax > len(m.prs) {
+		listMax = len(m.prs)
+	}
+	checksMax := avail - listMax
+
+	allRows := m.renderRows(innerW)
+	start, end := visibleWindow(len(allRows), m.cursor, listMax)
+	listBody := strings.Join(allRows[start:end], "\n")
 	divider := lipgloss.NewStyle().Foreground(colSubtle).Render(strings.Repeat("─", innerW))
-	full := listBody + "\n" + divider + "\n" + m.checksSection(innerW)
+	full := listBody + "\n" + divider + "\n" + m.checksSection(innerW, checksMax-2)
 
 	b.WriteString(box.Render(full))
 	b.WriteString("\n")
-	b.WriteString(m.footer([][2]string{
+	ft := m.footer([][2]string{
 		{"↑/↓", "move"},
 		{"o", "open PR"},
 		{"a", "open action"},
 		{"l", "logs"},
 		{"r", "refresh"},
 		{"q", "quit"},
-	}))
+	})
+	if len(m.prs) > 1 {
+		ft += helpDesc.Render(fmt.Sprintf("    %d/%d", m.cursor+1, len(m.prs)))
+	}
+	b.WriteString(ft)
 	return b.String()
+}
+
+// visibleWindow returns the [start,end) slice bounds of a maxVisible-sized
+// window into a total-length list, centred on cursor so it stays in view.
+func visibleWindow(total, cursor, maxVisible int) (start, end int) {
+	if maxVisible >= total {
+		return 0, total
+	}
+	start = cursor - maxVisible/2
+	if start < 0 {
+		start = 0
+	}
+	end = start + maxVisible
+	if end > total {
+		end = total
+		start = end - maxVisible
+	}
+	return start, end
 }
 
 func (m Model) renderRows(innerW int) []string {
@@ -97,21 +138,33 @@ func (m Model) renderRows(innerW int) []string {
 			repoW = l
 		}
 	}
+	// Cap the repo column so a long "owner/repo" name can't crowd out the
+	// title on narrow terminals; it scales with the box width.
+	if repoCap := max(6, innerW/5); repoW > repoCap {
+		repoW = repoCap
+	}
+
 	const commentsW = 6 // "💬 99 " — emoji is 2 cells
-	// Layout: [badge 14][gap 2][#num 6][gap 2][cmts 6][gap 2][repo repoW][gap 2][title rest]; -2 for cursor prefix.
-	titleW := max(10, innerW-14-2-6-2-commentsW-2-repoW-2-2)
+	const numW = 7      // "#%-4d" + " " + approved marker
+	// Layout: [cursor 2][badge 14][gap 2][#num numW][gap 2][cmts commentsW][gap 2][repo repoW][gap 2][title rest]
+	fixed := 2 + 14 + 2 + numW + 2 + commentsW + 2 + repoW + 2
+	titleW := max(1, innerW-fixed)
 
 	rows := make([]string, 0, len(m.prs))
 	for i, p := range m.prs {
 		st := badge(p)
-		num := hyperlink(p.URL, lipgloss.NewStyle().Foreground(colMuted).Render(fmt.Sprintf("#%-4d", p.Number)))
+		num := hyperlink(p.URL, lipgloss.NewStyle().Foreground(colMuted).Render(fmt.Sprintf("#%-4d", p.Number))) + " " + approvedMark(p)
 		cmt := commentsCell(p.Comments, commentsW)
 		title := p.Title
 		if len(title) > titleW {
-			title = title[:titleW-1] + "…"
+			title = title[:max(0, titleW-1)] + "…"
+		}
+		repo := p.Repo
+		if len(repo) > repoW {
+			repo = repo[:max(0, repoW-1)] + "…"
 		}
 		repoStyled := lipgloss.NewStyle().Foreground(colAccent).
-			Render(fmt.Sprintf("%-*s", repoW, p.Repo))
+			Render(fmt.Sprintf("%-*s", repoW, repo))
 		line := fmt.Sprintf("%s  %s  %s  %s  %s", st, num, cmt, repoStyled, title)
 		if i == m.cursor {
 			rows = append(rows, rowSelStyle.Width(innerW).Render("▸ "+line))
@@ -122,6 +175,15 @@ func (m Model) renderRows(innerW int) []string {
 	return rows
 }
 
+// approvedMark is a one-cell green check for approved PRs, blank otherwise,
+// so the column stays aligned.
+func approvedMark(p github.PR) string {
+	if !p.Approved {
+		return " "
+	}
+	return lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("✔")
+}
+
 func commentsCell(n int, width int) string {
 	pad := lipgloss.NewStyle().Width(width)
 	if n == 0 {
@@ -130,7 +192,7 @@ func commentsCell(n int, width int) string {
 	return pad.Render(lipgloss.NewStyle().Foreground(colPending).Render(fmt.Sprintf("💬 %d", n)))
 }
 
-func (m Model) checksSection(innerW int) string {
+func (m Model) checksSection(innerW int, maxRows int) string {
 	if m.cursor >= len(m.prs) {
 		return ""
 	}
@@ -145,8 +207,18 @@ func (m Model) checksSection(innerW int) string {
 	const tsW = 18 // "12:34:56 (5m ago) "
 	nameW := max(10, innerW-2-tsW)
 
-	rows := make([]string, 0, len(p.Checks))
-	for _, c := range p.Checks {
+	shown := p.Checks
+	truncated := false
+	if maxRows <= 0 {
+		shown = nil
+		truncated = true
+	} else if len(shown) > maxRows {
+		shown = shown[:maxRows-1]
+		truncated = true
+	}
+
+	rows := make([]string, 0, len(shown)+1)
+	for _, c := range shown {
 		name := c.Name
 		if len(name) > nameW {
 			name = name[:nameW-1] + "…"
@@ -162,6 +234,9 @@ func (m Model) checksSection(innerW int) string {
 		ts := subtitleStyle.Render(formatTS(c.At))
 		nameCell := lipgloss.NewStyle().Width(nameW).Render(nameStyled)
 		rows = append(rows, fmt.Sprintf("%s %s  %s", checkIcon(c.State), nameCell, ts))
+	}
+	if truncated {
+		rows = append(rows, subtitleStyle.Render(fmt.Sprintf("  … %d more", len(p.Checks)-len(shown))))
 	}
 
 	return title + "\n\n" + strings.Join(rows, "\n")

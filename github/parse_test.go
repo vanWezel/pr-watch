@@ -180,12 +180,12 @@ func TestPR_Ready(t *testing.T) {
 		p    PR
 		want bool
 	}{
-		{"approved-green", PR{Approved: true, Total: 1, Passed: 1}, true},
-		{"approved-no-checks", PR{Approved: true}, true},
-		{"not-approved", green, false},
-		{"approved-failing", PR{Approved: true, Total: 1, Failed: 1}, false},
-		{"approved-running", PR{Approved: true, Total: 1, Running: 1}, false},
-		{"approved-conflicts", PR{Approved: true, Conflicts: true, Total: 1, Passed: 1}, false},
+		{"clean-green", PR{Clean: true, Total: 1, Passed: 1}, true},
+		{"clean-no-checks", PR{Clean: true}, true},
+		{"not-clean", green, false},
+		{"clean-failing", PR{Clean: true, Total: 1, Failed: 1}, false},
+		{"clean-running", PR{Clean: true, Total: 1, Running: 1}, false},
+		{"approved-but-blocked", PR{Approved: true, Total: 1, Passed: 1}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,10 +196,15 @@ func TestPR_Ready(t *testing.T) {
 	}
 }
 
-func TestPRFromJSON_ApprovalAndConflicts(t *testing.T) {
-	p := prFromJSON(gjson.Parse(`{"reviewDecision":"APPROVED","mergeable":"CONFLICTING"}`))
-	if !p.Approved || !p.Conflicts {
-		t.Fatalf("review/mergeable not parsed: %+v", p)
+func TestPRFromJSON_ApprovalAndMergeState(t *testing.T) {
+	p := prFromJSON(gjson.Parse(`{"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"}`))
+	if !p.Approved || !p.Clean {
+		t.Fatalf("review/mergeStateStatus not parsed: %+v", p)
+	}
+	for _, st := range []string{"BLOCKED", "DIRTY", "BEHIND", "UNSTABLE", "DRAFT", ""} {
+		if prFromJSON(gjson.Parse(`{"mergeStateStatus":"` + st + `"}`)).Clean {
+			t.Fatalf("%q must not be clean", st)
+		}
 	}
 
 	// A decision from GitHub wins over individual reviews.
