@@ -48,6 +48,9 @@ var (
 func badge(p github.PR) string {
 	const w = 14
 	pad := lipgloss.NewStyle().Width(w)
+	if p.Ready() {
+		return pad.Render(lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("✔ ready"))
+	}
 	switch p.State() {
 	case github.StateSuccess:
 		return pad.Render(lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("● pass"))

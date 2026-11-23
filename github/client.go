@@ -67,6 +67,8 @@ const prFields = `nodes {
         title
         url
         headRefName
+        reviewDecision
+        mergeable
         repository { nameWithOwner }
         reviewThreads(first: 100) { nodes { isResolved } }
         commits(last: 1) {

@@ -198,6 +198,34 @@ func TestPRFromNode_AggregateCounts(t *testing.T) {
 	}
 }
 
+func TestPR_Ready(t *testing.T) {
+	green := PR{Total: 1, Passed: 1}
+	cases := []struct {
+		name string
+		p    PR
+		want bool
+	}{
+		{"approved-green", PR{Approved: true, Total: 1, Passed: 1}, true},
+		{"approved-no-checks", PR{Approved: true}, true},
+		{"not-approved", green, false},
+		{"approved-failing", PR{Approved: true, Total: 1, Failed: 1}, false},
+		{"approved-running", PR{Approved: true, Total: 1, Running: 1}, false},
+		{"approved-conflicts", PR{Approved: true, Conflicts: true, Total: 1, Passed: 1}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.p.Ready(); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	n := prNode{ReviewDecision: "APPROVED", Mergeable: "CONFLICTING"}
+	if p := prFromNode(n); !p.Approved || !p.Conflicts {
+		t.Fatalf("review/mergeable not parsed: %+v", p)
+	}
+}
+
 func TestPR_State(t *testing.T) {
 	cases := []struct {
 		name string
