@@ -23,11 +23,15 @@ type contextNode struct {
 }
 
 type prNode struct {
-	Number     int    `json:"number"`
-	Title      string `json:"title"`
-	URL        string `json:"url"`
-	HeadRef    string `json:"headRefName"`
-	Repository struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	HeadRef string `json:"headRefName"`
+	// ReviewDecision is APPROVED/CHANGES_REQUESTED/REVIEW_REQUIRED, or empty
+	// when the repo doesn't require reviews.
+	ReviewDecision string `json:"reviewDecision"`
+	Mergeable      string `json:"mergeable"` // MERGEABLE/CONFLICTING/UNKNOWN
+	Repository     struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
 	ReviewThreads struct {
@@ -55,6 +59,9 @@ func prFromNode(n prNode) PR {
 		URL:     n.URL,
 		HeadRef: n.HeadRef,
 		Repo:    n.Repository.NameWithOwner,
+
+		Approved:  n.ReviewDecision == "APPROVED",
+		Conflicts: n.Mergeable == "CONFLICTING",
 	}
 	for _, t := range n.ReviewThreads.Nodes {
 		if !t.IsResolved {

@@ -36,6 +36,16 @@ type PR struct {
 	Passed   int
 	Total    int
 	Comments int // unresolved review threads
+
+	Approved  bool // reviewDecision == APPROVED
+	Conflicts bool // merge conflicts with base
+}
+
+// Ready reports whether the PR is approved, green (or has no checks) and
+// conflict-free, i.e. safe to merge.
+func (p PR) Ready() bool {
+	s := p.State()
+	return p.Approved && !p.Conflicts && (s == StateSuccess || s == StateNone)
 }
 
 // State derives a single status from the per-check counts. Running takes
