@@ -1,11 +1,31 @@
 package github
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
-func TestCheckFromNode_CheckRunStates(t *testing.T) {
+func ts(ago time.Duration) string {
+	return time.Now().Add(-ago).UTC().Format(time.RFC3339)
+}
+
+// prJSON wraps check contexts in the commits.nodes[0].commit.statusCheckRollup
+// shape GitHub returns.
+func prJSON(extra string, contexts ...string) gjson.Result {
+	list := ""
+	for i, c := range contexts {
+		if i > 0 {
+			list += ","
+		}
+		list += c
+	}
+	return gjson.Parse(fmt.Sprintf(`{%s "commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[%s]}}}}]}}`, extra, list))
+}
+
+func TestCheckFromJSON_CheckRunStates(t *testing.T) {
 	cases := []struct {
 		name       string
 		status     string
@@ -27,14 +47,10 @@ func TestCheckFromNode_CheckRunStates(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			n := contextNode{
-				Typename:   "CheckRun",
-				Name:       "build",
-				Status:     tc.status,
-				Conclusion: tc.conclusion,
-			}
-			got := checkFromNode(n).State
-			if got != tc.want {
+			n := gjson.Parse(fmt.Sprintf(
+				`{"__typename":"CheckRun","name":"build","status":%q,"conclusion":%q}`,
+				tc.status, tc.conclusion))
+			if got := checkFromJSON(n).State; got != tc.want {
 				t.Fatalf("status=%s conclusion=%s: got %s, want %s",
 					tc.status, tc.conclusion, got, tc.want)
 			}
@@ -42,7 +58,7 @@ func TestCheckFromNode_CheckRunStates(t *testing.T) {
 	}
 }
 
-func TestCheckFromNode_StatusContextStates(t *testing.T) {
+func TestCheckFromJSON_StatusContextStates(t *testing.T) {
 	cases := []struct {
 		state string
 		want  CheckState
@@ -56,78 +72,46 @@ func TestCheckFromNode_StatusContextStates(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
-			n := contextNode{
-				Typename: "StatusContext",
-				Context:  "ci/legacy",
-				State:    tc.state,
-			}
-			got := checkFromNode(n).State
-			if got != tc.want {
+			n := gjson.Parse(fmt.Sprintf(
+				`{"__typename":"StatusContext","context":"ci/legacy","state":%q}`, tc.state))
+			if got := checkFromJSON(n).State; got != tc.want {
 				t.Fatalf("state=%s: got %s, want %s", tc.state, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestCheckFromNode_FieldMapping(t *testing.T) {
-	completed := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
-	cr := checkFromNode(contextNode{
-		Typename:    "CheckRun",
-		Name:        "test",
-		DetailsURL:  "https://example/run/1",
-		CompletedAt: completed,
-		Status:      "COMPLETED",
-		Conclusion:  "SUCCESS",
-	})
+func TestCheckFromJSON_FieldMapping(t *testing.T) {
+	completed := ts(5 * time.Minute)
+	cr := checkFromJSON(gjson.Parse(fmt.Sprintf(
+		`{"__typename":"CheckRun","name":"test","detailsUrl":"https://example/run/1","completedAt":%q,"status":"COMPLETED","conclusion":"SUCCESS"}`,
+		completed)))
 	if cr.Name != "test" || cr.URL != "https://example/run/1" || cr.At.IsZero() {
 		t.Fatalf("CheckRun fields not mapped: %+v", cr)
 	}
 
-	sc := checkFromNode(contextNode{
-		Typename:  "StatusContext",
-		Context:   "ci/legacy",
-		TargetURL: "https://example/build/2",
-		CreatedAt: completed,
-		State:     "SUCCESS",
-	})
+	sc := checkFromJSON(gjson.Parse(fmt.Sprintf(
+		`{"__typename":"StatusContext","context":"ci/legacy","targetUrl":"https://example/build/2","createdAt":%q,"state":"SUCCESS"}`,
+		completed)))
 	if sc.Name != "ci/legacy" || sc.URL != "https://example/build/2" || sc.At.IsZero() {
 		t.Fatalf("StatusContext fields not mapped: %+v", sc)
 	}
 
-	if checkFromNode(contextNode{Typename: "CheckRun"}).Name != "(unnamed)" {
+	if checkFromJSON(gjson.Parse(`{"__typename":"CheckRun"}`)).Name != "(unnamed)" {
 		t.Fatal("expected (unnamed) fallback")
 	}
 }
 
-func TestPRFromNode_RetryCollapsesOldAttempt(t *testing.T) {
-	// Simulate a check that failed and is now being re-run: the rollup
-	// returns both attempts. Only the newer one should count.
-	old := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
-	newAttempt := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)
+func TestPRFromJSON_RetryCollapsesOldAttempt(t *testing.T) {
+	// A check that failed and is now being re-run: the rollup returns both
+	// attempts. Only the newer one should count.
+	n := prJSON(`"number":1,`,
+		fmt.Sprintf(`{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE","completedAt":%q}`, ts(10*time.Minute)),
+		fmt.Sprintf(`{"__typename":"CheckRun","name":"test","status":"IN_PROGRESS","startedAt":%q}`, ts(time.Minute)),
+		fmt.Sprintf(`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","completedAt":%q}`, ts(time.Minute)),
+	)
 
-	n := prNode{Number: 1}
-	var entry struct {
-		Commit struct {
-			StatusCheckRollup *struct {
-				Contexts struct {
-					Nodes []contextNode `json:"nodes"`
-				} `json:"contexts"`
-			} `json:"statusCheckRollup"`
-		} `json:"commit"`
-	}
-	entry.Commit.StatusCheckRollup = &struct {
-		Contexts struct {
-			Nodes []contextNode `json:"nodes"`
-		} `json:"contexts"`
-	}{}
-	entry.Commit.StatusCheckRollup.Contexts.Nodes = []contextNode{
-		{Typename: "CheckRun", Name: "test", Status: "COMPLETED", Conclusion: "FAILURE", CompletedAt: old},
-		{Typename: "CheckRun", Name: "test", Status: "IN_PROGRESS", StartedAt: newAttempt},
-		{Typename: "CheckRun", Name: "lint", Status: "COMPLETED", Conclusion: "SUCCESS", CompletedAt: newAttempt},
-	}
-	n.Commits.Nodes = append(n.Commits.Nodes, entry)
-
-	p := prFromNode(n)
+	p := prFromJSON(n)
 	if p.Total != 2 {
 		t.Fatalf("Total = %d, want 2 (retries should collapse)", p.Total)
 	}
@@ -145,53 +129,44 @@ func TestPRFromNode_RetryCollapsesOldAttempt(t *testing.T) {
 	}
 }
 
-func TestPRFromNode_UnresolvedComments(t *testing.T) {
-	n := prNode{Number: 7}
-	n.ReviewThreads.Nodes = []struct {
-		IsResolved bool `json:"isResolved"`
-	}{
-		{IsResolved: false},
-		{IsResolved: true},
-		{IsResolved: false},
-		{IsResolved: false},
-	}
-	if got := prFromNode(n).Comments; got != 3 {
+func TestPRFromJSON_UnresolvedComments(t *testing.T) {
+	n := gjson.Parse(`{"number":7,"reviewThreads":{"nodes":[
+		{"isResolved":false},{"isResolved":true},{"isResolved":false},{"isResolved":false}]}}`)
+	if got := prFromJSON(n).Comments; got != 3 {
 		t.Fatalf("Comments = %d, want 3", got)
 	}
 }
 
-func TestPRFromNode_AggregateCounts(t *testing.T) {
-	n := prNode{Number: 42, Title: "hi", URL: "u", HeadRef: "main"}
-	n.Repository.NameWithOwner = "acme/api"
-
-	var entry struct {
-		Commit struct {
-			StatusCheckRollup *struct {
-				Contexts struct {
-					Nodes []contextNode `json:"nodes"`
-				} `json:"contexts"`
-			} `json:"statusCheckRollup"`
-		} `json:"commit"`
+func TestPRFromJSON_NoRollup(t *testing.T) {
+	// PRs with no commits/rollup (null) must parse without checks.
+	for _, in := range []string{
+		`{"number":1}`,
+		`{"number":1,"commits":{"nodes":[]}}`,
+		`{"number":1,"commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}`,
+	} {
+		if p := prFromJSON(gjson.Parse(in)); p.Total != 0 || p.State() != StateNone {
+			t.Fatalf("%s: got %+v", in, p)
+		}
 	}
-	entry.Commit.StatusCheckRollup = &struct {
-		Contexts struct {
-			Nodes []contextNode `json:"nodes"`
-		} `json:"contexts"`
-	}{}
-	entry.Commit.StatusCheckRollup.Contexts.Nodes = []contextNode{
-		{Typename: "CheckRun", Name: "a", Status: "COMPLETED", Conclusion: "SUCCESS"},
-		{Typename: "CheckRun", Name: "b", Status: "COMPLETED", Conclusion: "FAILURE"},
-		{Typename: "CheckRun", Name: "c", Status: "IN_PROGRESS"},
-		{Typename: "StatusContext", Context: "d", State: "PENDING"},
-	}
-	n.Commits.Nodes = append(n.Commits.Nodes, entry)
+}
 
-	p := prFromNode(n)
+func TestPRFromJSON_AggregateCounts(t *testing.T) {
+	n := prJSON(`"number":42,"title":"hi","url":"u","headRefName":"main","repository":{"nameWithOwner":"acme/api"},`,
+		`{"__typename":"CheckRun","name":"a","status":"COMPLETED","conclusion":"SUCCESS"}`,
+		`{"__typename":"CheckRun","name":"b","status":"COMPLETED","conclusion":"FAILURE"}`,
+		`{"__typename":"CheckRun","name":"c","status":"IN_PROGRESS"}`,
+		`{"__typename":"StatusContext","context":"d","state":"PENDING"}`,
+	)
+
+	p := prFromJSON(n)
 	if p.Total != 4 || p.Passed != 1 || p.Failed != 1 || p.Running != 2 {
 		t.Fatalf("counts wrong: %+v", p)
 	}
 	if p.State() != StatePending {
 		t.Fatalf("state should be pending, got %s", p.State())
+	}
+	if p.Title != "hi" || p.URL != "u" || p.HeadRef != "main" {
+		t.Fatalf("fields not mapped: %+v", p)
 	}
 	if p.Key() != "acme/api#42" {
 		t.Fatalf("key=%s", p.Key())
@@ -219,10 +194,37 @@ func TestPR_Ready(t *testing.T) {
 			}
 		})
 	}
+}
 
-	n := prNode{ReviewDecision: "APPROVED", Mergeable: "CONFLICTING"}
-	if p := prFromNode(n); !p.Approved || !p.Conflicts {
+func TestPRFromJSON_ApprovalAndConflicts(t *testing.T) {
+	p := prFromJSON(gjson.Parse(`{"reviewDecision":"APPROVED","mergeable":"CONFLICTING"}`))
+	if !p.Approved || !p.Conflicts {
 		t.Fatalf("review/mergeable not parsed: %+v", p)
+	}
+
+	// A decision from GitHub wins over individual reviews.
+	p = prFromJSON(gjson.Parse(`{"reviewDecision":"REVIEW_REQUIRED","latestOpinionatedReviews":{"nodes":[{"state":"APPROVED"}]}}`))
+	if p.Approved {
+		t.Fatal("REVIEW_REQUIRED must not count as approved")
+	}
+
+	// No decision (repo doesn't require reviews): fall back to actual reviews.
+	cases := []struct {
+		name   string
+		states string
+		want   bool
+	}{
+		{"approved", `[{"state":"APPROVED"}]`, true},
+		{"approved-and-changes-requested", `[{"state":"APPROVED"},{"state":"CHANGES_REQUESTED"}]`, false},
+		{"no-reviews", `[]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := gjson.Parse(`{"reviewDecision":null,"latestOpinionatedReviews":{"nodes":` + tc.states + `}}`)
+			if got := prFromJSON(n).Approved; got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

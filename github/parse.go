@@ -3,89 +3,52 @@ package github
 import (
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
-// contextNode mirrors the union type returned for each check in the
-// statusCheckRollup.contexts list. CheckRun fields and StatusContext fields
-// are both populated; the Typename discriminates.
-type contextNode struct {
-	Typename    string `json:"__typename"`
-	Name        string `json:"name"`        // CheckRun
-	DetailsURL  string `json:"detailsUrl"`  // CheckRun
-	StartedAt   string `json:"startedAt"`   // CheckRun
-	CompletedAt string `json:"completedAt"` // CheckRun
-	Context     string `json:"context"`     // StatusContext
-	TargetURL   string `json:"targetUrl"`   // StatusContext
-	CreatedAt   string `json:"createdAt"`   // StatusContext
-	Status      string `json:"status"`      // CheckRun: QUEUED/IN_PROGRESS/COMPLETED/...
-	Conclusion  string `json:"conclusion"`  // CheckRun: SUCCESS/FAILURE/...
-	State       string `json:"state"`       // StatusContext: PENDING/SUCCESS/FAILURE/ERROR
-}
-
-type prNode struct {
-	Number  int    `json:"number"`
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	HeadRef string `json:"headRefName"`
-	// ReviewDecision is APPROVED/CHANGES_REQUESTED/REVIEW_REQUIRED, or empty
-	// when the repo doesn't require reviews.
-	ReviewDecision string `json:"reviewDecision"`
-	Mergeable      string `json:"mergeable"` // MERGEABLE/CONFLICTING/UNKNOWN
-	Repository     struct {
-		NameWithOwner string `json:"nameWithOwner"`
-	} `json:"repository"`
-	ReviewThreads struct {
-		Nodes []struct {
-			IsResolved bool `json:"isResolved"`
-		} `json:"nodes"`
-	} `json:"reviewThreads"`
-	Commits struct {
-		Nodes []struct {
-			Commit struct {
-				StatusCheckRollup *struct {
-					Contexts struct {
-						Nodes []contextNode `json:"nodes"`
-					} `json:"contexts"`
-				} `json:"statusCheckRollup"`
-			} `json:"commit"`
-		} `json:"nodes"`
-	} `json:"commits"`
-}
-
-func prFromNode(n prNode) PR {
+// prFromJSON builds a PR from one `nodes` entry of the GraphQL search result.
+func prFromJSON(n gjson.Result) PR {
 	p := PR{
-		Number:  n.Number,
-		Title:   n.Title,
-		URL:     n.URL,
-		HeadRef: n.HeadRef,
-		Repo:    n.Repository.NameWithOwner,
+		Number:    int(n.Get("number").Int()),
+		Title:     n.Get("title").String(),
+		URL:       n.Get("url").String(),
+		HeadRef:   n.Get("headRefName").String(),
+		Repo:      n.Get("repository.nameWithOwner").String(),
+		Conflicts: n.Get("mergeable").String() == "CONFLICTING",
+		Comments:  int(n.Get(`reviewThreads.nodes.#(isResolved==false)#|#`).Int()),
+	}
 
-		Approved:  n.ReviewDecision == "APPROVED",
-		Conflicts: n.Mergeable == "CONFLICTING",
+	if d := n.Get("reviewDecision").String(); d != "" {
+		p.Approved = d == "APPROVED"
+	} else {
+		// No decision (repo doesn't require reviews): fall back to each
+		// reviewer's latest review.
+		approvals := n.Get(`latestOpinionatedReviews.nodes.#(state=="APPROVED")#|#`).Int()
+		blocks := n.Get(`latestOpinionatedReviews.nodes.#(state=="CHANGES_REQUESTED")#|#`).Int()
+		p.Approved = approvals > 0 && blocks == 0
 	}
-	for _, t := range n.ReviewThreads.Nodes {
-		if !t.IsResolved {
-			p.Comments++
-		}
-	}
-	if len(n.Commits.Nodes) == 0 || n.Commits.Nodes[0].Commit.StatusCheckRollup == nil {
+
+	contexts := n.Get("commits.nodes.0.commit.statusCheckRollup.contexts.nodes")
+	if !contexts.Exists() {
 		return p
 	}
 	// GitHub's rollup returns every check-run attempt, including stale
 	// failures that have since been re-run. Keep only the newest attempt
 	// per check name so a retry doesn't show as still failed.
 	idxByName := map[string]int{}
-	for _, c := range n.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes {
-		ck := checkFromNode(c)
+	contexts.ForEach(func(_, c gjson.Result) bool {
+		ck := checkFromJSON(c)
 		if idx, ok := idxByName[ck.Name]; ok {
 			if !ck.At.Before(p.Checks[idx].At) {
 				p.Checks[idx] = ck
 			}
-			continue
+			return true
 		}
 		idxByName[ck.Name] = len(p.Checks)
 		p.Checks = append(p.Checks, ck)
-	}
+		return true
+	})
 	for _, ck := range p.Checks {
 		p.Total++
 		switch ck.State {
@@ -100,19 +63,21 @@ func prFromNode(n prNode) PR {
 	return p
 }
 
-func checkFromNode(c contextNode) Check {
+// checkFromJSON maps a statusCheckRollup context, which is either a CheckRun
+// or a legacy StatusContext (discriminated by __typename), to a Check.
+func checkFromJSON(c gjson.Result) Check {
 	ck := Check{State: StateNone}
-	if c.Typename == "CheckRun" {
-		ck.Name = c.Name
-		ck.URL = c.DetailsURL
-		if t := parseTS(c.CompletedAt); !t.IsZero() {
+	if c.Get("__typename").String() == "CheckRun" {
+		ck.Name = c.Get("name").String()
+		ck.URL = c.Get("detailsUrl").String()
+		if t := parseTS(c.Get("completedAt").String()); !t.IsZero() {
 			ck.At = t
-		} else if t := parseTS(c.StartedAt); !t.IsZero() {
+		} else if t := parseTS(c.Get("startedAt").String()); !t.IsZero() {
 			ck.At = t
 		}
-		switch strings.ToUpper(c.Status) {
+		switch strings.ToUpper(c.Get("status").String()) { // QUEUED/IN_PROGRESS/COMPLETED/...
 		case "COMPLETED":
-			switch strings.ToUpper(c.Conclusion) {
+			switch strings.ToUpper(c.Get("conclusion").String()) {
 			case "SUCCESS", "NEUTRAL", "SKIPPED":
 				ck.State = StateSuccess
 			case "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE":
@@ -122,10 +87,10 @@ func checkFromNode(c contextNode) Check {
 			ck.State = StatePending
 		}
 	} else {
-		ck.Name = c.Context
-		ck.URL = c.TargetURL
-		ck.At = parseTS(c.CreatedAt)
-		switch strings.ToUpper(c.State) {
+		ck.Name = c.Get("context").String()
+		ck.URL = c.Get("targetUrl").String()
+		ck.At = parseTS(c.Get("createdAt").String())
+		switch strings.ToUpper(c.Get("state").String()) {
 		case "SUCCESS":
 			ck.State = StateSuccess
 		case "FAILURE", "ERROR":

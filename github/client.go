@@ -5,13 +5,14 @@ package github
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 // CmdTimeout bounds every gh invocation. It's well above normal API
@@ -69,6 +70,7 @@ const prFields = `nodes {
         headRefName
         reviewDecision
         mergeable
+        latestOpinionatedReviews(first: 50) { nodes { state } }
         repository { nameWithOwner }
         reviewThreads(first: 100) { nodes { isResolved } }
         commits(last: 1) {
@@ -105,34 +107,24 @@ func FetchPRs(ctx context.Context, limit int) ([]PR, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp struct {
-		Data struct {
-			Authored struct {
-				Nodes []prNode `json:"nodes"`
-			} `json:"authored"`
-			Assigned struct {
-				Nodes []prNode `json:"nodes"`
-			} `json:"assigned"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+	if !gjson.ValidBytes(out) {
+		return nil, errors.New("parse gh response: invalid JSON")
 	}
-	if err := json.Unmarshal(out, &resp); err != nil {
-		return nil, fmt.Errorf("parse gh response: %w", err)
-	}
-	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("gh graphql: %s", resp.Errors[0].Message)
+	resp := gjson.ParseBytes(out)
+	if msg := resp.Get("errors.0.message"); msg.Exists() {
+		return nil, fmt.Errorf("gh graphql: %s", msg.String())
 	}
 	seen := map[string]bool{}
 	prs := make([]PR, 0)
-	for _, n := range append(resp.Data.Authored.Nodes, resp.Data.Assigned.Nodes...) {
-		p := prFromNode(n)
-		if seen[p.Key()] {
-			continue
+	for _, path := range []string{"data.authored.nodes", "data.assigned.nodes"} {
+		for _, n := range resp.Get(path).Array() {
+			p := prFromJSON(n)
+			if seen[p.Key()] {
+				continue
+			}
+			seen[p.Key()] = true
+			prs = append(prs, p)
 		}
-		seen[p.Key()] = true
-		prs = append(prs, p)
 	}
 	return prs, nil
 }
